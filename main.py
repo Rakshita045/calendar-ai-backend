@@ -47,19 +47,26 @@ class CalendarEvent(BaseModel):
 class EventList(BaseModel):
     events: list[CalendarEvent]
 
+@app.get("/events/")
+async def get_events():
+    conn = sqlite3.connect("calendar.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, start_datetime, end_datetime, description FROM events")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    events = [{"id": r[0], "title": r[1], "start_datetime": r[2], "end_datetime": r[3], "description": r[4]} for r in rows]
+    return {"status": "success", "data": events}
+
 @app.post("/upload-event-file/")
 async def process_file(file: UploadFile = File(...)):
     try:
         file_bytes = await file.read()
         
-        # Logic for PDF
-        if file.filename.endswith(".pdf"):
+        if file.filename.lower().endswith(".pdf"):
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-            extracted_text = ""
-            for page in pdf_reader.pages:
-                extracted_text += page.extract_text() + "\n"
+            extracted_text = "".join([page.extract_text() for page in pdf_reader.pages])
             content_to_send = f"Extract events from this PDF text: {extracted_text}"
-        # Logic for Images
         else:
             content_to_send = [
                 types.Part.from_bytes(data=file_bytes, mime_type=file.content_type),
@@ -79,17 +86,14 @@ async def process_file(file: UploadFile = File(...)):
         
         conn = sqlite3.connect("calendar.db")
         cursor = conn.cursor()
-        saved_events = []
         for event in extracted_data["events"]:
             cursor.execute('''
                 INSERT INTO events (title, start_datetime, end_datetime, description)
                 VALUES (?, ?, ?, ?)
             ''', (event["title"], event["start_datetime"], event["end_datetime"], event["description"]))
-            event["id"] = cursor.lastrowid
-            saved_events.append(event)
         conn.commit()
         conn.close()
         
-        return {"status": "success", "data": saved_events}
+        return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
