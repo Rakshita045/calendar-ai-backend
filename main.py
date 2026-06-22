@@ -1,4 +1,5 @@
-import os
+import PyPDF2
+import io
 import json
 import sqlite3
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -7,10 +8,8 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-# 1. Initialize the FastAPI application
 app = FastAPI(title="AI Calendar API")
 
-# 2. Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://calendar-ai-frontend.vercel.app", "http://localhost:3000"], 
@@ -19,8 +18,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Phase 3: Database Setup ---
-# This creates a local file called calendar.db and sets up our table automatically
 def init_db():
     conn = sqlite3.connect("calendar.db")
     cursor = conn.cursor()
@@ -36,13 +33,10 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Run the database setup immediately when the server starts
 init_db()
 
-# 3. Initialize the Gemini Client
 client = genai.Client()
 
-# --- Define Data Blueprints ---
 class CalendarEvent(BaseModel):
     title: str
     start_datetime: str  
@@ -52,44 +46,48 @@ class CalendarEvent(BaseModel):
 class EventList(BaseModel):
     events: list[CalendarEvent]
 
-# --- API Endpoints ---
-
 @app.get("/")
 def read_root():
     return {"message": "Backend server is running successfully!"}
 
-# NEW ENDPOINT: Fetch all saved events from the database
 @app.get("/events/")
 def get_events():
     try:
         conn = sqlite3.connect("calendar.db")
-        conn.row_factory = sqlite3.Row  # Makes rows act like dictionaries
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM events")
         rows = cursor.fetchall()
         conn.close()
-        
         events = [dict(row) for row in rows]
         return {"status": "success", "data": events}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# UPDATED ENDPOINT: Now saves to the database after extracting
-@app.post("/upload-event-image/")
-async def process_image(file: UploadFile = File(...)):
+# --- UPDATED: Handles both Images and PDFs ---
+@app.post("/upload-event-file/")
+async def process_file(file: UploadFile = File(...)):
     try:
-        image_bytes = await file.read()
-        print(f"Processing {file.filename} with Gemini...")
-        
+        file_bytes = await file.read()
+        extracted_text = ""
+
+        # Logic for PDF
+        if file.filename.endswith(".pdf"):
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+            for page in pdf_reader.pages:
+                extracted_text += page.extract_text() + "\n"
+            content_to_send = f"Extract events from this PDF text: {extracted_text}"
+            
+        # Logic for Images
+        else:
+            content_to_send = [
+                types.Part.from_bytes(data=file_bytes, mime_type=file.content_type),
+                "Extract all schedules, deadlines, or events from this image."
+            ]
+
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[
-                types.Part.from_bytes(
-                    data=image_bytes,
-                    mime_type=file.content_type, 
-                ),
-                "Extract all schedules, deadlines, or events from this image. Format the response strictly to match the requested schema. Use ISO 8601 format for dates (YYYY-MM-DDTHH:MM:SS)."
-            ],
+            contents=content_to_send,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=EventList,
@@ -98,7 +96,6 @@ async def process_image(file: UploadFile = File(...)):
 
         extracted_data = json.loads(response.text)
         
-        # --- NEW: Save the extracted events to our SQLite database ---
         conn = sqlite3.connect("calendar.db")
         cursor = conn.cursor()
         
@@ -109,7 +106,6 @@ async def process_image(file: UploadFile = File(...)):
                 VALUES (?, ?, ?, ?)
             ''', (event["title"], event["start_datetime"], event["end_datetime"], event["description"]))
             
-            # Attach the new database ID back to the event
             event["id"] = cursor.lastrowid
             saved_events.append(event)
             
